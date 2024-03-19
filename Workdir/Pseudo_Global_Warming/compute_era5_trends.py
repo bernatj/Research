@@ -151,8 +151,8 @@ def create_delta_pwg(levels,surface_vars, pressure_vars, output_dir):
     # Read pressure variables
     ds_pl_vars = {}
     for var in pressure_vars:
-        if var == 'rh':
-            ds_pl_vars[var] = xr.open_mfdataset(f'{dir}{var}/{var}-*-2.nc')['r'].sel(level=levels)
+        if var == 'r':
+            ds_pl_vars[var] = xr.open_mfdataset(f'{dir}rh/rh-*-2.nc')[var].sel(level=levels)
         else:
             ds_pl_vars[var] = xr.open_mfdataset(f'{dir}{var}/{var}-*-2.nc')[var].sel(level=levels)
 
@@ -186,7 +186,7 @@ def create_delta_pwg(levels,surface_vars, pressure_vars, output_dir):
 levels = [1000, 925, 850, 700, 600, 500, 400, 300, 250, 200, 150, 100, 50]
 
 surface_vars = ['t2m','tcwv']
-pressure_vars = ['t', 'rh']
+pressure_vars = ['t', 'r']
 output_dir = '/pool/usuarios/bernatj/Data/pgw-climatologies'
 
 

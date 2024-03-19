@@ -43,9 +43,9 @@ def adjust_geopotential(z, t, r, sp):
 
     # Integrate with height using the hydrostatic balance and ideal gas law
     for k in range(0, len(z.isobaricInhPa)-1, 1):
-        #tv_k12 = (tv[k] + t[k+1])/2
+        tv_k12 = (tv[k] + t[k+1])/2
         #z_new[k+1] = np.where(pressure[k+1] < sp, z_new[k] - (lnp[k+1] - lnp[k]) * R_d * tv_k12, z_new[k+1])
-        z_new[k+1] = z_new[k] - (lnp[k+1] - lnp[k]) * R_d * tv[k]
+        z_new[k+1] = z_new[k] - (lnp[k+1] - lnp[k]) * R_d * tv_k12
 
 
     return z_new
