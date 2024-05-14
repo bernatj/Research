@@ -3,9 +3,9 @@ from metpy.units import units
 import numpy as np
 import xarray as xr
 import datetime as dt
+import os
 
-
-def adjust_geopotential(z, t, r, sp):
+def adjust_geopotential(z, t, r):
     """
     Adjust geopotential based on temperature and relative humidity.
     
@@ -13,18 +13,11 @@ def adjust_geopotential(z, t, r, sp):
         z (xarray.DataArray): Geopotential data.
         t (xarray.DataArray): Temperature data.
         r (xarray.DataArray): Relative humidity data.
-        sp(xarray.DataArray): Surface Pressure.
         
     Returns:
         xarray.DataArray: Adjusted geopotential.
     """
     R_d = 287.05    # gas constant for dry air [J K-1 kg-1]
-
-    # Convert surface pressure to hPa if it's in Pascals
-    if np.max(sp) > 2000:  # Assuming pressure in Pascals if max value is greater than 2000
-        sp = sp / 100  # Convert from Pa to hPa
-
-    print(sp.values)
 
     try:
         pressure = z.level.broadcast_like(z)
@@ -44,7 +37,6 @@ def adjust_geopotential(z, t, r, sp):
     # Integrate with height using the hydrostatic balance and ideal gas law
     for k in range(0, len(z.isobaricInhPa)-1, 1):
         tv_k12 = (tv[k] + t[k+1])/2
-        #z_new[k+1] = np.where(pressure[k+1] < sp, z_new[k] - (lnp[k+1] - lnp[k]) * R_d * tv_k12, z_new[k+1])
         z_new[k+1] = z_new[k] - (lnp[k+1] - lnp[k]) * R_d * tv_k12
 
 
@@ -77,16 +69,14 @@ def apply_delta_to_initial_condition_cmip(initial_condition_files, ds_cmip_delta
     initial_condition_P = initial_condition_P.assign_coords(longitude=initial_condition_P["longitude"] % 360)
     initial_condition_P = initial_condition_P.sortby("longitude")
 
-    z_baro_before = adjust_geopotential(initial_condition_P['z'], initial_condition_P['t'], initial_condition_P['r'], \
-                                                   initial_condition_S['sp'])
+    z_baro_before = adjust_geopotential(initial_condition_P['z'], initial_condition_P['t'], initial_condition_P['r'])
     for var in ['t','r']:
         initial_condition_P[var] -= ds_cmip_deltas[var].rename({'level' : 'isobaricInhPa'})
 
     # Adjust geopotential
-    z_baro_after = adjust_geopotential(initial_condition_P['z'], initial_condition_P['t'], initial_condition_P['r'], \
-                                                   initial_condition_S['sp'])
+    z_baro_after = adjust_geopotential(initial_condition_P['z'], initial_condition_P['t'], initial_condition_P['r'])
     
-    delta_z = z_baro_after - z_baro_before            
+    delta_z = z_baro_before - z_baro_after            
     initial_condition_P['z'] = initial_condition_P['z']  - delta_z
 
     return initial_condition_S, initial_condition_P
@@ -169,37 +159,100 @@ def interpolate_to_dayofyear(data, day_of_year, method='linear'):
     return data_interpolated
 
 # Example usage:
-start_date = '2024-07-31'
+time_i = dt.datetime(2018,7,22,0)
+time_f = dt.datetime(2018,8,8,18)
+delta_h = 6
+
 path_delta = '/home/bernatj/Data/postprocessed-cmip6/interpolated-2.5deg-clim/'
+path_delta_mm = '/home/bernatj/Data/postprocessed-cmip6/interpolated-2.5deg-multimodel/'
+outputdir='/home/bernatj/Data/ai-forecasts/input/netcdf'
 
 dict_vars = {'t2m' : 'tas', 'tcwv' : 'prw', 't' : 'ta', 'r' : 'hur' }
 
-delta_files = {'t2m': path_delta + 'tas/tas_historical_ec-earth3-veg_r1i1p1f1_interpolated_1980-2014_1850-1900_delta.nc',
-               'tcwv': path_delta + 'prw/prw_historical_ec-earth3-veg_r1i1p1f1_interpolated_1980-2014_1850-1900_delta.nc',
-               't' : path_delta + 'ta/ta_historical_ec-earth3-veg_r1i1p1f1_interpolated_1980-2014_1850-1900_delta.nc',
-               'r' : path_delta + 'hur/hur_historical_ec-earth3-veg_r1i1p1f1_interpolated_1980-2014_1850-1900_delta.nc',}
+models = ['ec-earth3', 'ec-earth3-veg', 'iitm-esm', 'inm-cm5-0',\
+          'awi-cm-1-1-mr', 'awi-esm-1-1-lr', 'bcc-csm2-mr', 'bcc-esm1',
+          'cams-csm1-0', 'cas-esm2-0', 'cmcc-cm2-hr4', 'cmcc-cm2-sr5', 
+          'cmcc-esm2', 'canesm5', 'canesm5-1', 'ec-earth3-aerchem', 
+          'ec-earth3-cc', 'ec-earth3-veg-lr', 'fio-esm-2-0', 'inm-cm4-8', 
+          'kiost-esm', 'mpi-esm-1-2-ham', 'mpi-esm1-2-hr', 'mpi-esm1-2-lr', 
+          'nesm3', 'noresm2-lm', 'noresm2-mm', 'taiesm1', 'e3sm-1-1-eca']
+
+multimodel=True #set this to true to use multimodelmean
 
 path_ic = '/home/bernatj/Data/ai-forecasts/input/grib/'
-initial_condition_files = {'surface' : path_ic + 'fcnv2sm_sl_20180731.grib',
-                           'pressure' : path_ic + 'fcnv2sm_pl_20180731.grib'}
 
 #first we need to create the daily clims and interpolate to the right grid
 levels = [1000, 925, 850, 700, 600, 500, 400, 300, 250, 200, 150, 100, 50]
 
-print('interpolate data to ERA5 resolution and levels for the AI model ...')
-ds_cmip6_deltas = fix_cmip6_data(delta_files, levels)
+#generate list of initialization dates
+init_times = []
+current_time = time_i
+while current_time <= time_f:
+    init_times.append(current_time)
+    current_time += dt.timedelta(hours=delta_h)
 
-#need to interpolate to daily climatology
-# Convert start_date to datetime object
-start_date = dt.datetime.strptime(start_date, '%Y-%m-%d')
+if multimodel:
+    delta_files = {'t2m': path_delta_mm + f'tas/tas_multimodel_mean.nc',
+                    'tcwv': path_delta_mm + f'prw/prw_multimodel_mean.nc',
+                    't' : path_delta_mm + f'ta/ta_multimodel_mean.nc',
+                    'r' : path_delta_mm + f'hur/hur_multimodel_mean.nc'}
+    
+    ds_cmip6_deltas = fix_cmip6_data(delta_files, levels)
 
-# Calculate day of the year for start_date
-print('interpolate to day of the year ...')
-day_of_year = start_date.timetuple().tm_yday
-ds_cmip6_deltas_doy = interpolate_to_dayofyear(ds_cmip6_deltas, day_of_year)
+    for date in init_times:
+        print(date)
 
-print('applying teh deltas...')
-mod_initial_condition_S, mod_initial_condition_P = apply_delta_to_initial_condition_cmip(initial_condition_files, ds_cmip6_deltas_doy)
+        #initial condition files
+        yyyymmddhh = date.strftime('%Y%m%d%H')
+        initial_condition_files = {'surface' : path_ic + f'{yyyymmddhh}/fcnv2_sl_{yyyymmddhh}.grib',
+                                    'pressure' : path_ic + f'{yyyymmddhh}/fcnv2_pl_{yyyymmddhh}.grib'}
 
-mod_initial_condition_S.to_netcdf('/home/bernatj/Data/ai-forecasts/input/netcdf/fcnv2sm_sl_PGW_ec-earth3-veg_v4_20180731.nc')
-mod_initial_condition_P.to_netcdf('/home/bernatj/Data/ai-forecasts/input/netcdf/fcnv2sm_pl_PGW_ec-earth3-veg_v4_20180731.nc')
+        # Calculate day of the year for start_date    
+        print('interpolate to day of the year ...')
+        day_of_year = date.timetuple().tm_yday
+        ds_cmip6_deltas_doy = interpolate_to_dayofyear(ds_cmip6_deltas, day_of_year)
+
+        print('applying the deltas...')
+        mod_initial_condition_S, mod_initial_condition_P = apply_delta_to_initial_condition_cmip(initial_condition_files, ds_cmip6_deltas_doy)
+
+        #create folder in case it does not exist
+        os.makedirs(outputdir+'/'+yyyymmddhh, exist_ok=True)
+        mod_initial_condition_S.to_netcdf(f'{outputdir}/{yyyymmddhh}/fcnv2_sl_PGW_multimodel_{yyyymmddhh}.nc')
+        mod_initial_condition_P.to_netcdf(f'{outputdir}/{yyyymmddhh}/fcnv2_pl_PGW_multimodel_{yyyymmddhh}.nc')
+
+else:
+    for model in models:
+        print(model)
+        delta_files = {'t2m': path_delta + f'tas/tas_{model}_delta.nc',
+                    'tcwv': path_delta + f'prw/prw_{model}_delta.nc',
+                    't' : path_delta + f'ta/ta_{model}_delta.nc',
+                    'r' : path_delta + f'hur/hur_{model}_delta.nc'}
+
+        print('interpolate data to ERA5 resolution and levels for the AI model ...')
+        try:
+            ds_cmip6_deltas = fix_cmip6_data(delta_files, levels)
+            print(f'model {model} files have been found and prepared to use')
+        except:
+            print(f'INFO: model files not available for model {model}')
+            continue
+        
+        for date in init_times:
+            print(date)
+
+            #initial condition files
+            yyyymmddhh = date.strftime('%Y%m%d%H')
+            initial_condition_files = {'surface' : path_ic + f'{yyyymmddhh}/fcnv2_sl_{yyyymmddhh}.grib',
+                                       'pressure' : path_ic + f'{yyyymmddhh}/fcnv2_pl_{yyyymmddhh}.grib'}
+
+            # Calculate day of the year for start_date    
+            print('interpolate to day of the year ...')
+            day_of_year = date.timetuple().tm_yday
+            ds_cmip6_deltas_doy = interpolate_to_dayofyear(ds_cmip6_deltas, day_of_year)
+
+            print('applying the deltas...')
+            mod_initial_condition_S, mod_initial_condition_P = apply_delta_to_initial_condition_cmip(initial_condition_files, ds_cmip6_deltas_doy)
+
+            #create folder in case it does not exist
+            os.makedirs(outputdir+'/'+yyyymmddhh, exist_ok=True)
+            mod_initial_condition_S.to_netcdf(f'{outputdir}/{yyyymmddhh}/fcnv2_sl_PGW_{model}_{yyyymmddhh}.nc')
+            mod_initial_condition_P.to_netcdf(f'{outputdir}/{yyyymmddhh}/fcnv2_pl_PGW_{model}_{yyyymmddhh}.nc')
