@@ -42,17 +42,20 @@ def adjust_geopotential(z, t, r):
 
     return z_new
 
-def apply_delta_to_initial_condition_cmip(initial_condition_files, ds_cmip_deltas):
+def apply_delta_to_initial_condition_cmip(initial_condition_files, ds_cmip_deltas, mode='substract', factor=1):
     """
-    Apply delta files to an existing initial condition given a start date.
+    Apply pseudo global warming delta files to an existing initial condition given a start date.
     
     Parameters:
-        initial_condition_files (dict): path containing the initial condition file
-        surface_delta_files (dict): Dictionary containing surface delta file paths for each variable.
-        pressure_delta_files (dict): Dictionary containing pressure delta file paths for each variable.
+        initial_condition_files (dict): Dictionary containing the paths of the initial condition files. 
+                                        It should have two keys: 'surface' and 'pressure'.
+        ds_cmip_deltas (xarray.Dataset): Dataset containing the delta values for each variable.
+        mode (str, optional): The mode of operation. It can be either 'substract' or 'add'. Default is 'substract'.
+        factor (float, optional): The factor by which the delta values are multiplied. Default is 1.
         
     Returns:
-        xarray.Dataset: Modified initial condition.
+        tuple: A tuple containing two xarray.Datasets. The first one is the modified initial condition for surface variables,
+               and the second one is for pressure variables.
     """
 
     # Apply surface delta
@@ -62,7 +65,10 @@ def apply_delta_to_initial_condition_cmip(initial_condition_files, ds_cmip_delta
     initial_condition_S= initial_condition_S.sortby("longitude")
 
     for var in ['t2m','tcwv']:
-        initial_condition_S[var] -= ds_cmip_deltas[var]
+        if mode=='substract':
+            initial_condition_S[var] -= ds_cmip_deltas[var] * factor
+        elif mode=='add':
+            initial_condition_S[var] += ds_cmip_deltas[var] * factor
 
     # Apply pressure delta
     initial_condition_P  = xr.open_dataset(initial_condition_files['pressure'],engine='cfgrib')
@@ -71,7 +77,10 @@ def apply_delta_to_initial_condition_cmip(initial_condition_files, ds_cmip_delta
 
     z_baro_before = adjust_geopotential(initial_condition_P['z'], initial_condition_P['t'], initial_condition_P['r'])
     for var in ['t','r']:
-        initial_condition_P[var] -= ds_cmip_deltas[var].rename({'level' : 'isobaricInhPa'})
+        if mode=='substract':
+            initial_condition_P[var] -= ds_cmip_deltas[var].rename({'level' : 'isobaricInhPa'}) * factor
+        elif mode=='add':
+            initial_condition_P[var] += ds_cmip_deltas[var].rename({'level' : 'isobaricInhPa'}) * factor
 
     # Adjust geopotential
     z_baro_after = adjust_geopotential(initial_condition_P['z'], initial_condition_P['t'], initial_condition_P['r'])
@@ -83,6 +92,18 @@ def apply_delta_to_initial_condition_cmip(initial_condition_files, ds_cmip_delta
 
 
 def fix_cmip6_data(delta_files, levels):
+    """
+    Fixes the CMIP6 data by reading the surface variables, converting the pressure levels from Pa to hPa, 
+    interpolating each variable in the dataset to the new pressure levels, and performing horizontal interpolation 
+    to a 0.25 degree grid.
+    
+    Parameters:
+        delta_files (dict): Dictionary containing the delta file paths for each variable.
+        levels (list): List of pressure levels to which the variables should be interpolated.
+        
+    Returns:
+        xarray.Dataset: The fixed and interpolated CMIP6 data.
+    """
 
     dict_vars = {'t2m' : 'tas', 'tcwv' : 'prw', 't' : 'ta', 'r' : 'hur' }
     reversed_dict = {v: k for k, v in dict_vars.items()}
@@ -131,10 +152,11 @@ def interpolate_to_dayofyear(data, day_of_year, method='linear'):
     
     Parameters:
         data (xarray.Dataset or xarray.DataArray): Monthly climatology dataset or array.
+        day_of_year (int): The day of the year to which the data should be interpolated.
         method (str, optional): Interpolation method. Default is 'linear'.
         
     Returns:
-        xarray.Dataset or xarray.DataArray: Daily climatology dataset or array.
+        xarray.Dataset or xarray.DataArray: Daily climatology dataset or array interpolated to the specified day of the year.
     """
     # Number of days per month
     num_days = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
@@ -160,7 +182,7 @@ def interpolate_to_dayofyear(data, day_of_year, method='linear'):
 
 # Example usage:
 time_i = dt.datetime(2018,7,22,0)
-time_f = dt.datetime(2018,8,8,18)
+time_f = dt.datetime(2018,7,8,18)
 delta_h = 6
 
 path_delta = '/home/bernatj/Data/postprocessed-cmip6/interpolated-2.5deg-clim/'
@@ -178,6 +200,7 @@ models = ['ec-earth3', 'ec-earth3-veg', 'iitm-esm', 'inm-cm5-0',\
           'nesm3', 'noresm2-lm', 'noresm2-mm', 'taiesm1', 'e3sm-1-1-eca']
 
 multimodel=True #set this to true to use multimodelmean
+mode = 'add' #add or substract the delta (default is substract)
 
 path_ic = '/home/bernatj/Data/ai-forecasts/input/grib/'
 
@@ -213,12 +236,12 @@ if multimodel:
         ds_cmip6_deltas_doy = interpolate_to_dayofyear(ds_cmip6_deltas, day_of_year)
 
         print('applying the deltas...')
-        mod_initial_condition_S, mod_initial_condition_P = apply_delta_to_initial_condition_cmip(initial_condition_files, ds_cmip6_deltas_doy)
+        mod_initial_condition_S, mod_initial_condition_P = apply_delta_to_initial_condition_cmip(initial_condition_files, ds_cmip6_deltas_doy,mode=mode)
 
         #create folder in case it does not exist
         os.makedirs(outputdir+'/'+yyyymmddhh, exist_ok=True)
-        mod_initial_condition_S.to_netcdf(f'{outputdir}/{yyyymmddhh}/fcnv2_sl_PGW_multimodel_{yyyymmddhh}.nc')
-        mod_initial_condition_P.to_netcdf(f'{outputdir}/{yyyymmddhh}/fcnv2_pl_PGW_multimodel_{yyyymmddhh}.nc')
+        mod_initial_condition_S.to_netcdf(f'{outputdir}/{yyyymmddhh}/fcnv2_sl_PGW_{mode}_multimodel_{yyyymmddhh}.nc')
+        mod_initial_condition_P.to_netcdf(f'{outputdir}/{yyyymmddhh}/fcnv2_pl_PGW_{mode}_multimodel_{yyyymmddhh}.nc')
 
 else:
     for model in models:
