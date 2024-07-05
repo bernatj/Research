@@ -5,7 +5,7 @@ import xarray as xr
 import datetime as dt
 import os
 
-def adjust_geopotential(z, t, r):
+def adjust_geopotential(z, t, r, sp=False):
     """
     Adjust geopotential based on temperature and relative humidity.
     
@@ -13,6 +13,7 @@ def adjust_geopotential(z, t, r):
         z (xarray.DataArray): Geopotential data.
         t (xarray.DataArray): Temperature data.
         r (xarray.DataArray): Relative humidity data.
+        sp (Bolean): If True relative humidity data is specific humidity instead
         
     Returns:
         xarray.DataArray: Adjusted geopotential.
@@ -26,8 +27,11 @@ def adjust_geopotential(z, t, r):
 
     lnp = np.log(pressure)
 
-    # Calculate mixing ratio from relative humidity
-    w = metpy.calc.mixing_ratio_from_relative_humidity(pressure * units.hPa , t * units.K , r/100)
+    # Calculate mixing ratio from relative humidity or specific humidity
+    if not sp:
+        w = metpy.calc.mixing_ratio_from_relative_humidity(pressure * units.hPa , t * units.K , r/100)
+    elif sp:
+        w = r / (1 -r)
 
     # Calculate virtual temperature
     tv = metpy.calc.virtual_temperature(t*units.K, w).values
@@ -42,7 +46,7 @@ def adjust_geopotential(z, t, r):
 
     return z_new
 
-def apply_delta_to_initial_condition_cmip(initial_condition_files, ds_cmip_deltas, mode='substract', factor=1):
+def apply_delta_to_initial_condition_cmip(initial_condition_files, ds_cmip_deltas, surf_vars, pl_vars, mode='substract', factor=1):
     """
     Apply pseudo global warming delta files to an existing initial condition given a start date.
     
@@ -64,7 +68,7 @@ def apply_delta_to_initial_condition_cmip(initial_condition_files, ds_cmip_delta
     initial_condition_S = initial_condition_S.assign_coords(longitude=initial_condition_S["longitude"] % 360)
     initial_condition_S= initial_condition_S.sortby("longitude")
 
-    for var in ['t2m','tcwv']:
+    for var in surf_vars:
         if mode=='substract':
             initial_condition_S[var] -= ds_cmip_deltas[var] * factor
         elif mode=='add':
@@ -75,16 +79,23 @@ def apply_delta_to_initial_condition_cmip(initial_condition_files, ds_cmip_delta
     initial_condition_P = initial_condition_P.assign_coords(longitude=initial_condition_P["longitude"] % 360)
     initial_condition_P = initial_condition_P.sortby("longitude")
 
-    z_baro_before = adjust_geopotential(initial_condition_P['z'], initial_condition_P['t'], initial_condition_P['r'])
-    for var in ['t','r']:
+    if 'q' in pl_vars:
+        z_baro_before = adjust_geopotential(initial_condition_P['z'], initial_condition_P['t'], initial_condition_P['q'], sp=True)
+    elif 'r' in pl_vars:
+        z_baro_before = adjust_geopotential(initial_condition_P['z'], initial_condition_P['t'], initial_condition_P['r'])
+
+    for var in pl_vars:
         if mode=='substract':
             initial_condition_P[var] -= ds_cmip_deltas[var].rename({'level' : 'isobaricInhPa'}) * factor
         elif mode=='add':
             initial_condition_P[var] += ds_cmip_deltas[var].rename({'level' : 'isobaricInhPa'}) * factor
 
     # Adjust geopotential
-    z_baro_after = adjust_geopotential(initial_condition_P['z'], initial_condition_P['t'], initial_condition_P['r'])
-    
+    if 'q' in pl_vars:
+        z_baro_after = adjust_geopotential(initial_condition_P['z'], initial_condition_P['t'], initial_condition_P['q'], sp=True)
+    elif 'r' in pl_vars:
+        z_baro_after = adjust_geopotential(initial_condition_P['z'], initial_condition_P['t'], initial_condition_P['r'])
+
     delta_z = z_baro_before - z_baro_after            
     initial_condition_P['z'] = initial_condition_P['z']  - delta_z
 
@@ -105,17 +116,18 @@ def fix_cmip6_data(delta_files, levels):
         xarray.Dataset: The fixed and interpolated CMIP6 data.
     """
 
-    dict_vars = {'t2m' : 'tas', 'tcwv' : 'prw', 't' : 'ta', 'r' : 'hur' }
-    reversed_dict = {v: k for k, v in dict_vars.items()}
+    dict_vars = {'t2m' : 'tas', 'tcwv' : 'prw', 't' : 'ta', 'r' : 'hur', 'q' : 'hus'}
 
         # Read surface variables
     ds_vars = {}
     for var, delta_file in delta_files.items():
+        print(var)
         var_cmip6 = dict_vars[var] 
         ds_vars[var] = xr.open_dataset(delta_file)[var_cmip6]
     
     ds_vars = xr.merge(list(ds_vars.values()))
-
+    # Create a reversed dictionary that only contains variables that are in the dataset
+    reversed_dict = {v: k for k, v in dict_vars.items() if v in ds_vars.data_vars}
     ds_vars = ds_vars.rename(reversed_dict)
 
     # Convert pressure levels from Pa to hPa
@@ -182,14 +194,14 @@ def interpolate_to_dayofyear(data, day_of_year, method='linear'):
 
 # Example usage:
 time_i = dt.datetime(2018,7,22,0)
-time_f = dt.datetime(2018,7,8,18)
+time_f = dt.datetime(2018,8,8,18)
 delta_h = 6
 
 path_delta = '/home/bernatj/Data/postprocessed-cmip6/interpolated-2.5deg-clim/'
 path_delta_mm = '/home/bernatj/Data/postprocessed-cmip6/interpolated-2.5deg-multimodel/'
 outputdir='/home/bernatj/Data/ai-forecasts/input/netcdf'
 
-dict_vars = {'t2m' : 'tas', 'tcwv' : 'prw', 't' : 'ta', 'r' : 'hur' }
+dict_vars = {'t2m' : 'tas', 'tcwv' : 'prw', 't' : 'ta', 'r' : 'hur', 'q' : 'hus' }
 
 models = ['ec-earth3', 'ec-earth3-veg', 'iitm-esm', 'inm-cm5-0',\
           'awi-cm-1-1-mr', 'awi-esm-1-1-lr', 'bcc-csm2-mr', 'bcc-esm1',
@@ -200,8 +212,8 @@ models = ['ec-earth3', 'ec-earth3-veg', 'iitm-esm', 'inm-cm5-0',\
           'nesm3', 'noresm2-lm', 'noresm2-mm', 'taiesm1', 'e3sm-1-1-eca']
 
 multimodel=True #set this to true to use multimodelmean
-mode = 'add' #add or substract the delta (default is substract)
-
+mode = 'substract' #add or substract the delta (default is substract)
+ai_model='pangu' #fcntv2
 path_ic = '/home/bernatj/Data/ai-forecasts/input/grib/'
 
 #first we need to create the daily clims and interpolate to the right grid
@@ -215,20 +227,28 @@ while current_time <= time_f:
     current_time += dt.timedelta(hours=delta_h)
 
 if multimodel:
-    delta_files = {'t2m': path_delta_mm + f'tas/tas_multimodel_mean.nc',
-                    'tcwv': path_delta_mm + f'prw/prw_multimodel_mean.nc',
-                    't' : path_delta_mm + f'ta/ta_multimodel_mean.nc',
-                    'r' : path_delta_mm + f'hur/hur_multimodel_mean.nc'}
+    if ai_model=='fcnv2':
+        delta_files = {'t2m': path_delta_mm + f'tas/tas_multimodel_mean.nc',\
+                        'tcwv': path_delta_mm + f'prw/prw_multimodel_mean.nc',\
+                        't' : path_delta_mm + f'ta/ta_multimodel_mean.nc',\
+                        'r' : path_delta_mm + f'hur/hur_multimodel_mean.nc'}
+        surf_vars=['t2m','tcwv']
+        pl_vars=['t','r']
+    elif ai_model=='pangu':
+        delta_files = {'t2m': path_delta_mm + f'tas/tas_multimodel_mean.nc',\
+                        't' : path_delta_mm + f'ta/ta_multimodel_mean.nc',\
+                        'q' : path_delta_mm + f'hus/hus_multimodel_mean.nc'}
+        surf_vars=['t2m']
+        pl_vars=['t','q']
     
     ds_cmip6_deltas = fix_cmip6_data(delta_files, levels)
 
     for date in init_times:
         print(date)
-
         #initial condition files
         yyyymmddhh = date.strftime('%Y%m%d%H')
-        initial_condition_files = {'surface' : path_ic + f'{yyyymmddhh}/fcnv2_sl_{yyyymmddhh}.grib',
-                                    'pressure' : path_ic + f'{yyyymmddhh}/fcnv2_pl_{yyyymmddhh}.grib'}
+        initial_condition_files = {'surface' : path_ic + f'{yyyymmddhh}/{ai_model}_sl_{yyyymmddhh}.grib',
+                                    'pressure' : path_ic + f'{yyyymmddhh}/{ai_model}_pl_{yyyymmddhh}.grib'}
 
         # Calculate day of the year for start_date    
         print('interpolate to day of the year ...')
@@ -236,12 +256,14 @@ if multimodel:
         ds_cmip6_deltas_doy = interpolate_to_dayofyear(ds_cmip6_deltas, day_of_year)
 
         print('applying the deltas...')
-        mod_initial_condition_S, mod_initial_condition_P = apply_delta_to_initial_condition_cmip(initial_condition_files, ds_cmip6_deltas_doy,mode=mode)
+        mod_initial_condition_S, mod_initial_condition_P = \
+            apply_delta_to_initial_condition_cmip(initial_condition_files, ds_cmip6_deltas_doy,\
+                                                  surf_vars, pl_vars, mode=mode)
 
         #create folder in case it does not exist
         os.makedirs(outputdir+'/'+yyyymmddhh, exist_ok=True)
-        mod_initial_condition_S.to_netcdf(f'{outputdir}/{yyyymmddhh}/fcnv2_sl_PGW_{mode}_multimodel_{yyyymmddhh}.nc')
-        mod_initial_condition_P.to_netcdf(f'{outputdir}/{yyyymmddhh}/fcnv2_pl_PGW_{mode}_multimodel_{yyyymmddhh}.nc')
+        mod_initial_condition_S.to_netcdf(f'{outputdir}/{yyyymmddhh}/{ai_model}_sl_PGW_multimodel_{yyyymmddhh}.nc')
+        mod_initial_condition_P.to_netcdf(f'{outputdir}/{yyyymmddhh}/{ai_model}_pl_PGW_multimodel_{yyyymmddhh}.nc')
 
 else:
     for model in models:
