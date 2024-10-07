@@ -115,6 +115,10 @@ sliced_era5 = (
 
 if flag_pwg:
     print('PGW simulation. Start interpolating ACC signals to ERA5 grid...')
+
+    #sliced era modified
+    sliced_era5_pgw = sliced_era5.copy(deep=False)
+
     ds_vars = {}
     for var in delta_vars.keys():
         var_cmip6 = delta_vars[var] 
@@ -126,25 +130,26 @@ if flag_pwg:
     reversed_dict = {v: k for k, v in delta_vars.items() if v in ds_vars.data_vars}
     ds_vars = ds_vars.rename(reversed_dict)
 
-    # Convert pressure levels from Pa to hPa
-    ds_vars['plev'] = ds_vars['plev'] / 100
-    # Optionally, update the units attribute
-    ds_vars['plev'].attrs['units'] = 'hPa'
-    #rename variable to level
-    ds_vars = ds_vars.rename({'plev' : 'level'})
+    if 'plev' in ds_vars.coords:
+        # Convert pressure levels from Pa to hPa
+        ds_vars['plev'] = ds_vars['plev'] / 100
+        # Optionally, update the units attribute
+        ds_vars['plev'].attrs['units'] = 'hPa'
+        #rename variable to level
+        ds_vars = ds_vars.rename({'plev' : 'level'})
 
-    #levels as in the 37 levels used by NeuralGCM
-    levels = sliced_era5_pgw.level.values
+        #levels as in the 37 levels used by NeuralGCM
+        levels = sliced_era5_pgw.level.values
 
-    # Interpolate each variable in the dataset to the new pressure levels
-    interpolated_ds = xr.Dataset()
-    for var_name in ds_vars.data_vars:
-        if 'level' in ds_vars[var_name].dims:  # Check if the variable depends on pressure
-            interpolated_var = ds_vars[var_name].interp(level=levels,method='linear', kwargs={"fill_value": "extrapolate"})
-            interpolated_ds[var_name] = interpolated_var.interpolate_na(dim='level', method='linear')
-        interpolated_ds[var_name] = ds_vars[var_name]
+        # Interpolate each variable in the dataset to the new pressure levels
+        interpolated_ds = xr.Dataset()
+        for var_name in ds_vars.data_vars:
+            if 'level' in ds_vars[var_name].dims:  # Check if the variable depends on pressure
+                interpolated_var = ds_vars[var_name].interp(level=levels,method='linear', kwargs={"fill_value": "extrapolate"})
+                interpolated_ds[var_name] = interpolated_var.interpolate_na(dim='level', method='linear')
+            interpolated_ds[var_name] = ds_vars[var_name]
 
-    interpolated_ds = interpolated_ds.interpolate_na(dim='level', method='linear')
+        interpolated_ds = interpolated_ds.interpolate_na(dim='level', method='linear')
 
     #horizontal interpolation to 0,25deg grid
     new_lons=np.arange(0,360,0.25)
