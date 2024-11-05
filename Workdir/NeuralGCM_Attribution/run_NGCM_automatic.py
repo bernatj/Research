@@ -1,7 +1,7 @@
 import gcsfs
 import os
 import jax
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"  # second gpu
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"  # second gpu
 import numpy as np
 import pickle
 import xarray as xr
@@ -16,9 +16,9 @@ import datetime
 
 ###-----------------------CONFIGURATION--------------------------------------###
 #dates
-start_time = '2018-07-22'
-end_time = '2018-08-08'
-data_inner_steps = 6  # process every 24th hour
+start_time = '2023-10-27'
+end_time = '2023-11-05'
+data_inner_steps = 24  # process every 24th hour
 
 path_delta_mm = '/home/bernatj/Data/postprocessed-cmip6/interpolated-2.5deg-multimodel/'
 
@@ -26,33 +26,37 @@ path_delta_mm = '/home/bernatj/Data/postprocessed-cmip6/interpolated-2.5deg-mult
 # 'neural_gcm_dynamic_forcing_deterministic_1_4_deg.pkl', 
 # 'neural_gcm_dynamic_forcing_deterministic_2_8_deg.pkl',
 # 'neural_gcm_dynamic_forcing_stochastic_1_4_deg.pkl'] 
-model_name = 'neural_gcm_dynamic_forcing_deterministic_1_4_deg.pkl' 
+model_name = 'neural_gcm_dynamic_forcing_stochastic_1_4_deg.pkl'
 
 #read delta q for mm mean:  
-flag_pwg=True
-#delta_vars = {'specific_humidity' : 'hus', 'temperature' : 'ta', 
-#              'sea_surface_temperature' : 'tos',
-#              'sea_ice_cover' : 'siconc'}
+flag_pwg=False
+delta_vars = {'specific_humidity' : 'hus', 'temperature' : 'ta', 
+              'sea_surface_temperature' : 'tos',
+              'sea_ice_cover' : 'siconc'}
 
-delta_vars = {'specific_humidity' : 'hus', 'temperature' : 'ta'}
-#delta_vars = {'sea_surface_temperature' : 'tos',
-#              'sea_ice_cover' : 'siconc'}
+#delta_vars = {'specific_humidity' : 'hus', 'temperature' : 'ta'}
+#delta_vars = {'sea_surface_temperature' : 'tos', 'sea_ice_cover' : 'siconc'}
 
 
 #simulation options.
-t0_i = datetime.datetime(2018,7,22,0)
-t0_f = datetime.datetime(2018,8,8,18)
-delta_h = 6
+t0_i = datetime.datetime(2023,10,27,0)
+t0_f = datetime.datetime(2023,11,1,0)
+delta_h = 24
 inner_steps = 6  # in hours
 outer_steps = 10 * 24 // inner_steps  # total of 10 days
 timedelta = np.timedelta64(1, 'h') * inner_steps
 times = (np.arange(outer_steps) * inner_steps)  # time axis in hours
+n_members=20 #used if stocastic model is chosen
+seeds = np.random.randint(100, 2000, size=n_members) #seeds used to generate random initial perturbations
 
 #data_storage:
 save_path='/pool/usuarios/bernatj/Data/NeuralGCM_forecasts/'
 
-#exper = 'det_0p7_pgw_t_q_siconc_sst'
-exper = 'det_1p4_pgw_t_q'
+exper = 'stoc_1p4'
+#exper = 'stoc_1p4_pgw_t_q_siconc_sst'
+#exper = 'det_1p4_pgw_t_q_siconc_sst'
+#exper = 'det_1p4_pgw_t_q'
+#exper = 'det_1p4_pgw_siconc_sst'
 ###--------------------------------------------------------------------------###
 
 def interpolate_to_dayofyear(data, day_of_year, method='linear'):
@@ -130,6 +134,12 @@ if flag_pwg:
     reversed_dict = {v: k for k, v in delta_vars.items() if v in ds_vars.data_vars}
     ds_vars = ds_vars.rename(reversed_dict)
 
+    print(ds_vars)
+
+    #horizontal interpolation to 0,25deg grid
+    new_lons=np.arange(0,360,0.25)
+    new_lats=np.arange(90,-90.1,-0.25)
+
     if 'plev' in ds_vars.coords:
         # Convert pressure levels from Pa to hPa
         ds_vars['plev'] = ds_vars['plev'] / 100
@@ -151,11 +161,12 @@ if flag_pwg:
 
         interpolated_ds = interpolated_ds.interpolate_na(dim='level', method='linear')
 
-    #horizontal interpolation to 0,25deg grid
-    new_lons=np.arange(0,360,0.25)
-    new_lats=np.arange(90,-90.1,-0.25)
-    interpolated_grid_ds = interpolated_ds.interp(lon=new_lons, lat=new_lats, method='linear', kwargs={"fill_value": "extrapolate"})
-    interpolated_grid_ds = interpolated_grid_ds.rename({'lat' : 'latitude', 'lon' : 'longitude'})
+
+        interpolated_grid_ds = interpolated_ds.interp(lon=new_lons, lat=new_lats, method='linear', kwargs={"fill_value": "extrapolate"})
+        interpolated_grid_ds = interpolated_grid_ds.rename({'lat' : 'latitude', 'lon' : 'longitude'})
+    else:
+        interpolated_grid_ds = ds_vars.interp(lon=new_lons, lat=new_lats, method='linear', kwargs={"fill_value": "extrapolate"})
+        interpolated_grid_ds = interpolated_grid_ds.rename({'lat' : 'latitude', 'lon' : 'longitude'})
 
     #sliced era modified
     sliced_era5_pgw = sliced_era5.copy(deep=False)
@@ -163,7 +174,7 @@ if flag_pwg:
     #let's start applying the delta for each of the vars
     for i,time in enumerate(sliced_era5_pgw.time.values):
         #intepolate to the specific data
-        day_of_year = time.astype('datetime64[s]').astype(datetime).timetuple().tm_yday
+        day_of_year = time.astype('datetime64[s]').astype(datetime.datetime).timetuple().tm_yday
         for var in delta_vars.keys():
             if var == 'sea_ice_cover':
                 sliced_era5_pgw[var][i] = sliced_era5_pgw[var][i] - 0.01 *  interpolate_to_dayofyear(interpolated_grid_ds[var], day_of_year)
@@ -229,20 +240,42 @@ for init_time in init_times:
     # initialize model state
     inputs = model.inputs_from_xarray(reggrided_era5.sel(time=init_time))
     input_forcings = model.forcings_from_xarray(reggrided_era5.sel(time=init_time))
-    initial_state = model.encode(inputs, input_forcings)
 
     # use persistence for forcing variables (SST and sea ice cover)
     all_forcings = model.forcings_from_xarray(reggrided_era5.sel(time=init_time).expand_dims({"time": 1}))
 
-    # make forecast
-    final_state, predictions = model.unroll(
-        initial_state,
-        all_forcings,
-        steps=outer_steps,
-        timedelta=timedelta,
-        start_with_input=True,
-    )
-    predictions_ds = model.data_to_xarray(predictions, times=times)
+    if 'stochastic' in model_name:
+        predictions_member = []
+        for member in range(0,n_members):
+
+            ng_key = jax.random.key(seeds[member])  # optional for deterministic models
+            initial_state = model.encode(inputs, input_forcings, ng_key)
+
+            # make forecast
+            final_state, predictions = model.unroll(
+                initial_state,
+                all_forcings,
+                steps=outer_steps,
+                timedelta=timedelta,
+                start_with_input=True,
+            )
+            predictions_member.append(model.data_to_xarray(predictions, times=times))
+
+        predictions_ds = xr.concat(predictions_member, dim='member')
+
+    else:
+        
+        initial_state = model.encode(inputs, input_forcings)
+
+        # make forecast
+        final_state, predictions = model.unroll(
+            initial_state,
+            all_forcings,
+            steps=outer_steps,
+            timedelta=timedelta,
+            start_with_input=True,
+        )
+        predictions_ds = model.data_to_xarray(predictions, times=times)
 
     # Save the output in a NetCDF file
     print(f'simulation finished... saving data into netcdf')
@@ -252,7 +285,10 @@ for init_time in init_times:
     for var in predictions_ds:
         if var != 'sim_time':
             short_name = variable_short_names[var]
-            ds = predictions_ds[var].to_dataset(name=short_name).transpose('time','level','latitude','longitude')
+            if 'stochastic' in model_name:
+                ds = predictions_ds[var].to_dataset(name=short_name).transpose('member','time','level','latitude','longitude')
+            else:
+                ds = predictions_ds[var].to_dataset(name=short_name).transpose('time','level','latitude','longitude')
             ds = ds.assign_coords(time = model.sim_time_to_datetime64(predictions['sim_time']).astype('datetime64[ns]'))
             ds.to_netcdf(save_path+f'{yyyymmddhh}/{short_name}_neuralgcm_{exper}_{yyyymmddhh}.nc')
 
