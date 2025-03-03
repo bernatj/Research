@@ -16,7 +16,7 @@ def find_input_files(root_dir, experiments, time_res, table_id, member, models, 
                 files = [
                     os.path.join(directory, file)
                     for file in os.listdir(directory)
-                    if file.startswith(f"{var_name}_") and table_id in file and member in file and model in file.lower and file.endswith(".nc")
+                    if file.startswith(f"{var_name}_") and table_id in file and member in file and model in file.lower() and file.endswith(".nc")
                 ]
                 if files:
                     input_files.setdefault(exp, {}).setdefault(model, {})[var_name] = sorted(files)
@@ -143,15 +143,15 @@ output_dir = "/pool/usuarios/bernatj/Data/postprocessed-cmip6/climatology"
 input_files = find_input_files(root_dir, experiments, time_res, table_id, member, models, variables)
 
 # Compute Climatology First (1980-2014)
-climatology_files = parallel_climatology(input_files, output_dir, 1980, 2014, overwrite=False)
+climatology_files = parallel_climatology(input_files, output_dir, 1980, 2014, overwrite=True)
 
 # Interpolate Climatology
 interpolated_output_dir = output_dir + '-interpolated-2p5deg'
 os.makedirs(interpolated_output_dir, exist_ok=True)
-interpolated_files = parallel_interpolation(climatology_files, interpolated_output_dir, grid, overwrite=False)
+interpolated_files = parallel_interpolation(climatology_files, interpolated_output_dir, grid, overwrite=True)
 
 # Repeat for another time period (1850-1900)
-climatology_files = parallel_climatology(input_files, output_dir, 1850, 1900, overwrite=False)
-interpolated_files = parallel_interpolation(climatology_files, interpolated_output_dir, grid, overwrite=False)
+climatology_files = parallel_climatology(input_files, output_dir, 1850, 1900, overwrite=True)
+interpolated_files = parallel_interpolation(climatology_files, interpolated_output_dir, grid, overwrite=True)
 
 print("Final Interpolated Climatology Files:", interpolated_files)
