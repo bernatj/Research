@@ -5,6 +5,9 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "0"  # second gpu
 import numpy as np
 import pickle
 import xarray as xr
+import cftime
+import metpy 
+from metpy.units import units
 
 from dinosaur import horizontal_interpolation
 from dinosaur import spherical_harmonic
@@ -16,34 +19,39 @@ import datetime
 
 ###-----------------------CONFIGURATION--------------------------------------###
 #dates
-start_time = '2023-10-27'
-end_time = '2023-11-05'
-data_inner_steps = 24  # process every 24th hour
+start_time = '2018-7-22-00'
+end_time = '2018-7-22-00'
+data_inner_steps = 6  # process every 24th hour
 
-path_delta_mm = '/home/bernatj/Data/postprocessed-cmip6/interpolated-2.5deg-multimodel/'
+#path_delta_mm = '/home/bernatj/Data/postprocessed-cmip6/interpolated-2.5deg-multimodel/'
+path_delta_mm = '/home/bernatj/Data/postprocessed-cmip6/climatology-interpolated-2p5deg-deltas/'
 
 # 'neural_gcm_dynamic_forcing_deterministic_0_7_deg.pkl',
 # 'neural_gcm_dynamic_forcing_deterministic_1_4_deg.pkl', 
 # 'neural_gcm_dynamic_forcing_deterministic_2_8_deg.pkl',
 # 'neural_gcm_dynamic_forcing_stochastic_1_4_deg.pkl'] 
-model_name = 'neural_gcm_dynamic_forcing_stochastic_1_4_deg.pkl'
+model_name = 'neural_gcm_dynamic_forcing_deterministic_1_4_deg.pkl'
 
 #read delta q for mm mean:  
-flag_pwg=False
+flag_pwg=True
+adjust_z =True
 delta_vars = {'specific_humidity' : 'hus', 'temperature' : 'ta', 
               'sea_surface_temperature' : 'tos',
               'sea_ice_cover' : 'siconc'}
 
 #delta_vars = {'specific_humidity' : 'hus', 'temperature' : 'ta'}
 #delta_vars = {'sea_surface_temperature' : 'tos', 'sea_ice_cover' : 'siconc'}
+#delta_vars = {'sea_surface_temperature' : 'tos'}
 
 
 #simulation options.
-t0_i = datetime.datetime(2023,10,27,0)
-t0_f = datetime.datetime(2023,11,1,0)
-delta_h = 24
+#we want to run our model for different dates
+t0_i = datetime.datetime(2018,7,22,0)
+#t0_f = datetime.datetime(2022,4,1,18)
+t0_f = datetime.datetime(2018,7,22,0)
+delta_h = 6
 inner_steps = 6  # in hours
-outer_steps = 10 * 24 // inner_steps  # total of 10 days
+outer_steps = 1 * 24 // inner_steps  # total of 10 days
 timedelta = np.timedelta64(1, 'h') * inner_steps
 times = (np.arange(outer_steps) * inner_steps)  # time axis in hours
 n_members=20 #used if stocastic model is chosen
@@ -52,12 +60,63 @@ seeds = np.random.randint(100, 2000, size=n_members) #seeds used to generate ran
 #data_storage:
 save_path='/pool/usuarios/bernatj/Data/NeuralGCM_forecasts/'
 
-exper = 'stoc_1p4'
+#exper = 'stoc_1p4'
 #exper = 'stoc_1p4_pgw_t_q_siconc_sst'
-#exper = 'det_1p4_pgw_t_q_siconc_sst'
-#exper = 'det_1p4_pgw_t_q'
-#exper = 'det_1p4_pgw_siconc_sst'
+#exper = 'det_1p4'
+exper = 'det_1p4_pgw_t_q_zadjust_siconc_sst_v1'
+#exper = 'det_1p4_pgw_t_q_v1'
+#exper = 'det_1p4_pgw_siconc_sst_v1'
+#exper = 'det_1p4_pgw_sst_v1'
 ###--------------------------------------------------------------------------###
+
+def adjust_geopotential(z, t, r, sp=False, plev_dim_name='isobaricInhPa'):
+    """
+    Adjust geopotential based on temperature and relative humidity.
+    
+    Parameters:
+        z (xarray.DataArray): Geopotential data.
+        t (xarray.DataArray): Temperature data.
+        r (xarray.DataArray): Relative humidity data.
+        sp (Bolean): If True relative humidity data is specific humidity instead
+        
+    Returns:
+        xarray.DataArray: Adjusted geopotential.
+    """
+    R_d = 287.05    # gas constant for dry air [J K-1 kg-1]
+
+
+    pressure = z[plev_dim_name].broadcast_like(z)
+    lnp = np.log(pressure)
+
+    print(pressure)
+
+    # Calculate mixing ratio from relative humidity or specific humidity
+    if not sp:
+        w = metpy.calc.mixing_ratio_from_relative_humidity(pressure * units.hPa , t * units.K , r/100)
+    elif sp:
+        w = r / (1 -r)
+
+    # Calculate virtual temperature
+    tv = metpy.calc.virtual_temperature(t*units.K, w).values
+   
+    z_new = z.copy()
+
+    #check the order of the pressure levels
+    if z[plev_dim_name][0] > z[plev_dim_name][-1]:
+        # Integrate with height using the hydrostatic balance and ideal gas law
+        for k in range(0, len(z[plev_dim_name])-1, 1):
+            tv_k12 = (tv[k] + tv[k+1])/2
+            z_new[k+1] = z_new[k] - (lnp[k+1] - lnp[k]) * R_d * tv_k12
+    else:
+        # Integrate with height using the hydrostatic balance and ideal gas law
+        for k in range(len(z[plev_dim_name])-1, 0, -1):
+            print(k)
+            tv_k12 = (tv[k] + tv[k-1])/2
+            z_new[k-1] = z_new[k] - (lnp[k-1] - lnp[k]) * R_d * tv_k12
+
+    print(z_new.mean('latitude').mean('longitude'))
+
+    return z_new
 
 def interpolate_to_dayofyear(data, day_of_year, method='linear'):
     """
@@ -126,8 +185,14 @@ if flag_pwg:
     ds_vars = {}
     for var in delta_vars.keys():
         var_cmip6 = delta_vars[var] 
-        ds_vars[var] = xr.open_dataset(path_delta_mm+f'{var_cmip6}/{var_cmip6}_multimodel_mean.nc')[var_cmip6]
-    
+        ds_vars[var] = xr.open_dataset(path_delta_mm+f'{var_cmip6}/{var_cmip6}_multimodel_mean_10models_v1.nc')[var_cmip6]
+        #ds_vars[var] = xr.open_dataset(path_delta_mm+f'{var_cmip6}/{var_cmip6}_multimodel_mean.nc')[var_cmip6]
+
+        # Check if time is in `cftime.DatetimeNoLeap` format and convert to `datetime64[ns]` if needed
+        if isinstance(ds_vars[var]['time'].values[0], cftime.DatetimeNoLeap):
+            ds_vars[var]['time'] = ds_vars[var].indexes['time'].to_datetimeindex()
+            print(f"Time calendar for {var_cmip6}: {ds_vars[var]['time']}")
+
     ds_vars = xr.merge(list(ds_vars.values()))
 
     # Create a reversed dictionary that only contains variables that are in the dataset
@@ -169,7 +234,7 @@ if flag_pwg:
         interpolated_grid_ds = interpolated_grid_ds.rename({'lat' : 'latitude', 'lon' : 'longitude'})
 
     #sliced era modified
-    sliced_era5_pgw = sliced_era5.copy(deep=False)
+    sliced_era5_pgw = sliced_era5.copy(deep=True)
 
     #let's start applying the delta for each of the vars
     for i,time in enumerate(sliced_era5_pgw.time.values):
@@ -180,6 +245,14 @@ if flag_pwg:
                 sliced_era5_pgw[var][i] = sliced_era5_pgw[var][i] - 0.01 *  interpolate_to_dayofyear(interpolated_grid_ds[var], day_of_year)
             else:
                 sliced_era5_pgw[var][i] = sliced_era5_pgw[var][i] - interpolate_to_dayofyear(interpolated_grid_ds[var], day_of_year)
+        
+        if adjust_z:
+            print('adjsuting geopotential height...')
+            z_baro_before = adjust_geopotential(sliced_era5['geopotential'][i], sliced_era5['temperature'][i], sliced_era5['specific_humidity'][i], sp=True, plev_dim_name='level')
+            z_baro_after = adjust_geopotential(sliced_era5_pgw['geopotential'][i], sliced_era5_pgw['temperature'][i], sliced_era5_pgw['specific_humidity'][i], sp=True, plev_dim_name='level')
+            delta_z = z_baro_before - z_baro_after            
+            print(delta_z)
+            sliced_era5_pgw['geopotential'][i] =  sliced_era5_pgw['geopotential'][i] - delta_z
 
     #make sure sea ice cover does not get below 0
     sliced_era5_pgw['sea_ice_cover'] = xr.where(sliced_era5_pgw['sea_ice_cover']<0, 0., sliced_era5_pgw['sea_ice_cover'])
